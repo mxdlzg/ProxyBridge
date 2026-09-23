@@ -277,6 +277,11 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 UINT16 sp = ntohs(tcp_header->SrcPort);
                 UINT16 dp = ntohs(tcp_header->DstPort);
 
+                // A fresh SYN may reuse a source port whose previous DIRECT decision
+                // survived a missed FIN/RST. Clear that decision before the fast-path.
+                if (tcp_header->Syn && !tcp_header->Ack)
+                    port_clear(sp);
+
                 if (port_is_decided(sp))
                 {
                     if (tcp_header->Fin || tcp_header->Rst) port_clear(sp);
@@ -663,13 +668,13 @@ DWORD WINAPI packet_processor(LPVOID arg)
             {
                 UINT16 sp = ntohs(tcp_header->SrcPort);
 
-                // A fresh SYN starts a new connection that may be reusing an ephemeral
-                // port whose previous owner has closed. Evict any PID cached for this
-                // port so the rule decision is re-derived against the correct current
-                // process instead of a stale one (prevents wrong-app rule matching for
-                // up to PID_CACHE_TTL_MS after a port is recycled).
+                // A fresh SYN starts a new connection and may reuse a port whose prior
+                // DIRECT decision survived a missed FIN/RST.
                 if (tcp_header->Syn && !tcp_header->Ack)
+                {
+                    port_clear(sp);
                     remove_cached_pid(ip_header->SrcAddr, sp, FALSE);
+                }
 
                 if (port_is_decided(sp))
                 {
