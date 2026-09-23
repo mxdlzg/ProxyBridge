@@ -21,6 +21,16 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+    - name: Install Windows Driver Kit
+      run: |
+        winget install --id Microsoft.WindowsWDK.10.0.26100 --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+        $wdkHeader = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\km\ntddk.h"
+        if (-not (Test-Path $wdkHeader)) {
+          Write-Error "WDK headers not found at $wdkHeader"
+          exit 1
+        }
+      shell: pwsh
+
     - name: Install NSIS
       run: |
         choco install nsis -y
