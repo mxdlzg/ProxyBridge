@@ -31,6 +31,8 @@ HANDLE udp_relay_thread = NULL;
 HANDLE cleanup_thread = NULL;
 PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE] = {NULL};
 volatile BOOL g_has_active_rules = FALSE;
+volatile BOOL g_has_active_tcp_rules = FALSE;
+volatile BOOL g_has_active_udp_rules = FALSE;
 // Set when at least one enabled rule carries a domain filter. Gates the DNS-cache
 // lookup in match_rule so setups without domain rules pay zero extra cost.
 volatile BOOL g_has_domain_rules = FALSE;
@@ -108,6 +110,14 @@ DWORD WINAPI packet_processor(LPVOID arg)
             // IPv6 UDP
             if (tcp_header == NULL && udp_header != NULL)
             {
+                BOOL is_dns_response = !addr.Outbound && g_has_domain_rules &&
+                    ntohs(udp_header->SrcPort) == 53;
+                if (!g_has_active_udp_rules && g_connection_callback == NULL && !is_dns_response)
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
+
                 if (addr.Outbound)
                 {
                     UINT16 sp = ntohs(udp_header->SrcPort);
@@ -149,12 +159,6 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     }
 
                     if (is_ipv6_multicast_or_linklocal((const UINT8*)ipv6_header->DstAddr))
-                    {
-                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
-                        continue;
-                    }
-
-                    if (!g_has_active_rules && g_connection_callback == NULL)
                     {
                         WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                         continue;
@@ -457,6 +461,14 @@ DWORD WINAPI packet_processor(LPVOID arg)
 
         if (udp_header != NULL && tcp_header == NULL)
         {
+            BOOL is_dns_response = !addr.Outbound && g_has_domain_rules &&
+                ntohs(udp_header->SrcPort) == 53;
+            if (!g_has_active_udp_rules && g_connection_callback == NULL && !is_dns_response)
+            {
+                WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                continue;
+            }
+
             if (addr.Outbound)
             {
                 if (udp_header->SrcPort == htons(LOCAL_UDP_RELAY_PORT))
@@ -515,14 +527,6 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     UINT32 src_ip = ip_header->SrcAddr;
                     UINT32 dest_ip = ip_header->DstAddr;
                     UINT16 dest_port = ntohs(udp_header->DstPort);
-
-                    // if no rule configuree all connection direct with no checks avoid unwanted memory and pocessing whcich could delay
-                    if (!g_has_active_rules && g_connection_callback == NULL)
-                    {
-                        // No rules and no logging - pass through immediately (no checksum needed for unmodified packets)
-                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
-                        continue;
-                    }
 
                     RuleAction action;
                     DWORD pid = 0;
@@ -932,6 +936,9 @@ DWORD WINAPI cleanup_worker(LPVOID arg)
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 {
     char filter[FILTER_BUFFER_SIZE];
+    char udp_v4_filter[256] = "";
+    char dns_filter[160] = "";
+    char udp_v6_filter[256] = "";
     INT16 priority = 123;
 
     if (running)
@@ -939,6 +946,28 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 
     InitializeSRWLock(&lock);
     dns_cache_init();
+    update_has_active_rules();
+
+    BOOL need_udp_capture = g_has_active_udp_rules || g_connection_callback != NULL;
+    BOOL need_dns_capture = g_has_domain_rules;
+
+    if (need_udp_capture)
+    {
+        snprintf(udp_v4_filter, sizeof(udp_v4_filter),
+            " or (udp and (outbound or loopback or (udp.DstPort == %u or udp.SrcPort == %u)) and "
+            "udp.SrcPort != 67 and udp.DstPort != 67 and udp.SrcPort != 68 and udp.DstPort != 68)",
+            (unsigned int)LOCAL_UDP_RELAY_PORT, (unsigned int)LOCAL_UDP_RELAY_PORT);
+        snprintf(udp_v6_filter, sizeof(udp_v6_filter),
+            " or (ipv6 and udp and (outbound or loopback or (udp.DstPort == %u or udp.SrcPort == %u)) and "
+            "udp.SrcPort != 546 and udp.DstPort != 546 and udp.SrcPort != 547 and udp.DstPort != 547)",
+            (unsigned int)LOCAL_UDP_RELAY_PORT, (unsigned int)LOCAL_UDP_RELAY_PORT);
+    }
+    if (need_dns_capture)
+    {
+        snprintf(dns_filter, sizeof(dns_filter),
+            " or (udp and not outbound and udp.SrcPort == 53)"
+            " or (ipv6 and udp and not outbound and udp.SrcPort == 53)");
+    }
 
     // If domain rules were configured before start, flush the OS DNS cache so the very
     // first connections re-resolve on the wire and populate our IP->hostname snoop cache.
@@ -965,7 +994,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         return FALSE;
     }
 
-    if (any_socks5_config())
+    if (g_has_active_udp_rules && any_socks5_config())
     {
         udp_relay_thread = CreateThread(NULL, 1, udp_relay_server, NULL, 0, NULL);
         if (udp_relay_thread == NULL)
@@ -992,17 +1021,11 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     // ProxyBridge at all. DHCP is link-local broadcast (0.0.0.0 -> 255.255.255.255) and
     // #161  DHCPv4: client 68 / server 67     DHCPv6: client 546 / server 547
     snprintf(filter, sizeof(filter),
-        "not impostor and ("
-        "(tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
-        "(udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)) and "
-            "udp.SrcPort != 67 and udp.DstPort != 67 and udp.SrcPort != 68 and udp.DstPort != 68) or "
-        "(udp and not outbound and udp.SrcPort == 53) or "
-        "(ipv6 and udp and not outbound and udp.SrcPort == 53) or "
-        "(ipv6 and tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
-        "(ipv6 and udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)) and "
-            "udp.SrcPort != 546 and udp.DstPort != 546 and udp.SrcPort != 547 and udp.DstPort != 547))",
-        g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT,
-        g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT);
+        "not impostor and ((tcp and (outbound or loopback or (tcp.DstPort == %u or tcp.SrcPort == %u))) or "
+        "(ipv6 and tcp and (outbound or loopback or (tcp.DstPort == %u or tcp.SrcPort == %u)))%s%s%s)",
+        (unsigned int)g_local_relay_port, (unsigned int)g_local_relay_port,
+        (unsigned int)g_local_relay_port, (unsigned int)g_local_relay_port,
+        udp_v4_filter, dns_filter, udp_v6_filter);
 
     // Note: Added 'loopback' to filter to capture localhost (127.x.x.x) traffic
     // This enables proxying local connections for MITM scenarios
@@ -1075,8 +1098,6 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
             return FALSE;
         }
     }
-
-    update_has_active_rules();
 
     log_message("ProxyBridge started");
     log_message("Local relay: localhost:%d", g_local_relay_port);

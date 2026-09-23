@@ -1143,6 +1143,8 @@ PROXYBRIDGE_API BOOL ProxyBridge_MoveRuleToPosition(UINT32 rule_id, UINT32 new_p
 void update_has_active_rules(void)
 {
     BOOL has_active = FALSE;
+    BOOL has_tcp = FALSE;
+    BOOL has_udp = FALSE;
     BOOL has_domain = FALSE;
 
     AcquireSRWLockShared(&g_rules_lock);
@@ -1152,17 +1154,20 @@ void update_has_active_rules(void)
         if (rule->enabled)
         {
             has_active = TRUE;
+            if (rule->protocol == RULE_PROTOCOL_TCP || rule->protocol == RULE_PROTOCOL_BOTH)
+                has_tcp = TRUE;
+            if (rule->protocol == RULE_PROTOCOL_UDP || rule->protocol == RULE_PROTOCOL_BOTH)
+                has_udp = TRUE;
             if (rule_has_domain_filter(rule))
-            {
                 has_domain = TRUE;
-                break;  // both flags are now known
-            }
         }
         rule = rule->next;
     }
     ReleaseSRWLockShared(&g_rules_lock);
 
     g_has_active_rules = has_active;
+    g_has_active_tcp_rules = has_tcp;
+    g_has_active_udp_rules = has_udp;
 
     // Edge trigger: when domain rules first become active, flush the OS DNS cache so
     // subsequent connections re-resolve and populate our snoop cache.
