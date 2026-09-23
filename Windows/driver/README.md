@@ -129,7 +129,7 @@ to this copy — it is the kernel/user contract.
 ## Build
 
 Requires **Visual Studio Build Tools + WDK** with matching SDK/WDK versions (target
-`10.0.26100`, which provides the `km` headers). Output: `x64\Release\ProxyBridgeDrv.sys`.
+`10.0.28000`, which provides the `km` headers). Output: `x64\Release\ProxyBridgeDrv.sys`.
 
 ```
 build.bat                 REM Release  - or:

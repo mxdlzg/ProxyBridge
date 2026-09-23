@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-2022
+    runs-on: windows-latest
     permissions:
       contents: read
       actions: read
@@ -21,11 +21,26 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-    - name: Verify Windows Driver Kit
+    - name: Install Windows SDK and Driver Kit 28000
       run: |
-        $wdkHeader = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\km\ntddk.h"
+        winget install --id Microsoft.WindowsSDK.10.0.28000 --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+        winget install --id Microsoft.WindowsWDK.10.0.28000 --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+      shell: pwsh
+
+    - name: Verify VS2026 driver toolchain
+      run: |
+        Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" -ErrorAction Stop
+        Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\build" -ErrorAction Stop
+
+        $task = "C:\Program Files (x86)\Windows Kits\10\build\10.0.28000.0\bin\Microsoft.DriverKit.Build.Tasks.18.0.dll"
+        if (-not (Test-Path $task)) {
+          Write-Error "VS2026 WDK MSBuild task missing: $task"
+          exit 1
+        }
+
+        $wdkHeader = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.28000.0\km\ntddk.h"
         if (-not (Test-Path $wdkHeader)) {
-          Write-Error "WDK headers not found at $wdkHeader"
+          Write-Error "WDK headers not found: $wdkHeader"
           exit 1
         }
       shell: pwsh
